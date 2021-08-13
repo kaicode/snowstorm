@@ -145,9 +145,7 @@ public class BranchController {
 		}
 
 		Metadata metadata = branch.getMetadata();
-		Map<String, String> authFlagMap = metadata.getMapOrCreate(AUTHOR_FLAGS_METADATA_KEY);
-		authFlagMap.put(name, value);
-		metadata.putMap(AUTHOR_FLAGS_METADATA_KEY, authFlagMap);
+		metadata.getMapOrCreate(AUTHOR_FLAGS_METADATA_KEY).put(name, value);
 
 		return getBranchPojo(branchService.updateMetadata(branchPath, metadata));
 	}
