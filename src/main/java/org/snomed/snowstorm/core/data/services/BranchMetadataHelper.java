@@ -24,6 +24,7 @@ public class BranchMetadataHelper {
 
 	private static final String COMMIT_METADATA_KEY_PREFIX = "commit.";
 	private static final String DISABLE_CONTENT_AUTOMATIONS_TRANSIENT_METADATA_KEY = transientKey("disableContentAutomations");
+	private static final String DISABLE_TRACEABILITY_TRANSIENT_METADATA_KEY = transientKey("disableTraceabilityAutomations");
 	private static final String CLASSIFICATION_COMMIT_TRANSIENT_METADATA_KEY = transientKey("classificationCommit");
 
 	@Autowired
@@ -36,12 +37,20 @@ public class BranchMetadataHelper {
 		return COMMIT_METADATA_KEY_PREFIX + key;
 	}
 
-	public static void disableContentAutomations(Commit commit) {
+	public static void disableContentAutomationsForCommit(Commit commit) {
 		getInternal(commit).put(DISABLE_CONTENT_AUTOMATIONS_TRANSIENT_METADATA_KEY, "true");
 	}
 
-	public static boolean isContentAutomationsDisabled(Commit commit) {
+	public static boolean isContentAutomationsDisabledForCommit(Commit commit) {
 		return isTrue(getInternal(commit).get(DISABLE_CONTENT_AUTOMATIONS_TRANSIENT_METADATA_KEY));
+	}
+
+	public static void disableTraceabilityForCommit(Commit commit) {
+		getInternal(commit).put(DISABLE_TRACEABILITY_TRANSIENT_METADATA_KEY, "true");
+	}
+
+	public static boolean isTraceabilityDisabledForCommit(Commit commit) {
+		return isTrue(getInternal(commit).get(DISABLE_TRACEABILITY_TRANSIENT_METADATA_KEY));
 	}
 
 	public static void classificationCommit(Commit commit) {
