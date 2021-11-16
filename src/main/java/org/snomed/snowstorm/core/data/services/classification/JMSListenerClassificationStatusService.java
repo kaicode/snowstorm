@@ -17,6 +17,7 @@ import javax.jms.JMSException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
 @Component
 @ConditionalOnProperty(value = "classification-service.job.status.use-jms", havingValue = "true")
@@ -43,7 +44,7 @@ public class JMSListenerClassificationStatusService implements ClassificationSta
 	}
 
 	@Override
-	public ClassificationStatusResponse getStatusChange(String classificationId) {
-		return classificationStatusChanges.remove(classificationId);
+	public Optional<ClassificationStatusResponse> getStatusChange(String classificationId) {
+		return Optional.ofNullable(classificationStatusChanges.remove(classificationId));
 	}
 }

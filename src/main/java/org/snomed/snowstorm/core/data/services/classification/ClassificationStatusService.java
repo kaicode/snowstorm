@@ -2,6 +2,8 @@ package org.snomed.snowstorm.core.data.services.classification;
 
 import org.snomed.snowstorm.core.data.services.classification.pojo.ClassificationStatusResponse;
 
+import java.util.Optional;
+
 public interface ClassificationStatusService {
-	ClassificationStatusResponse getStatusChange(String classificationId);
+	Optional<ClassificationStatusResponse> getStatusChange(String classificationId);
 }

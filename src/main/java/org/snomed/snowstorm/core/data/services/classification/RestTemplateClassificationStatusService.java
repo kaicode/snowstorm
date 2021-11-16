@@ -7,6 +7,8 @@ import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import java.util.Optional;
+
 @Component
 @ConditionalOnProperty(value = "classification-service.job.status.use-jms", havingValue = "false")
 public class RestTemplateClassificationStatusService implements ClassificationStatusService {
@@ -28,7 +30,7 @@ public class RestTemplateClassificationStatusService implements ClassificationSt
 	}
 
 	@Override
-	public ClassificationStatusResponse getStatusChange(String classificationId) {
-		return restTemplate.getForObject("/classifications/{classificationId}", ClassificationStatusResponse.class, classificationId);
+	public Optional<ClassificationStatusResponse> getStatusChange(String classificationId) {
+		return Optional.ofNullable(restTemplate.getForObject("/classifications/{classificationId}", ClassificationStatusResponse.class, classificationId));
 	}
 }

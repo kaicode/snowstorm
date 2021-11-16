@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
 @Service
 class RemoteClassificationServiceClient {
@@ -87,7 +88,7 @@ class RemoteClassificationServiceClient {
 		return remoteClassificationId;
 	}
 
-	ClassificationStatusResponse getStatusChange(String classificationId) {
+	Optional<ClassificationStatusResponse> getStatusChange(String classificationId) {
 		return classificationStatusService.getStatusChange(classificationId);
 	}
 
