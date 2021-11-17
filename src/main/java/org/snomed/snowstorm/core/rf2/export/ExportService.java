@@ -164,7 +164,7 @@ public class ExportService {
 		
 		//Need to detect if this is an Edition or Extension package so we know what MDRS rows to export
 		//Extensions only mention their own modules, despite being able to "see" those on MAIN
-		Branch branch = branchService.findBranchOrThrow(branchPath);
+		Branch branch = branchService.findBranchOrThrow(branchPath, true);
 		final boolean isExtension = (branch.getMetadata() != null && !StringUtils.isEmpty(branch.getMetadata().getString(BranchMetadataKeys.DEPENDENCY_PACKAGE)));
 
 		try {
@@ -240,19 +240,20 @@ public class ExportService {
 						//Export filter is pass-through when null
 						ExportFilter<ReferenceSetMember> exportFilter = null;
 						if (isMDRS) {
+							logger.info("MDRS being exported for " + (isExtension?"extension":"edition") + " package style.");
 							exportFilter = new ExportFilter<ReferenceSetMember>() {
 								public boolean isValid(ReferenceSetMember rm) {
 									return mdrService.isExportable(rm, isExtension);
 								}
 							};
 						}
-						
+						mdrService.resetCounter();
 						if (generateMDR && isMDRS) {
 							logger.info("MDR being generated rather than persisted.");
 							String exportDir = referenceSetType.getExportDir();
 							String entryDirectory = !exportDir.startsWith("/") ? "Refset/" + exportDir + "/" : exportDir.substring(1) + "/";
 							String entryFilenamePrefix = (!entryDirectory.startsWith("Terminology/") ? "der2_" : "sct2_") + referenceSetType.getFieldTypes() + "Refset_" + referenceSetType.getName() + (refsetsOfThisType.size() > 1 ? refsetToExport : "");
-							exportComponents(
+							int rowCount = exportComponents(
 									ReferenceSetMember.class,
 									entryDirectoryPrefix, entryDirectory,
 									entryFilenamePrefix,
@@ -264,6 +265,7 @@ public class ExportService {
 									referenceSetType.getFieldNameList(), 
 									codeSystemRF2Name, 
 									exportFilter);
+							logger.info("Exported Reference Set {} {} with {} members", refsetToExport, referenceSetType.getName(), rowCount);
 						} else if (!refsetOnlyExport || refsetIds.contains(refsetToExport.toString())) {
 							BoolQueryBuilder memberQuery = getContentQuery(exportType, moduleIds, startEffectiveTime, memberBranchCriteria);
 							memberQuery.must(QueryBuilders.termQuery(ReferenceSetMember.Fields.REFSET_ID, refsetToExport));
@@ -332,6 +334,7 @@ public class ExportService {
 
 		String componentFilePath = entryDirectoryPrefix + entryDirectory + entryFilenamePrefix + format("%s_%s_%s.txt", exportType.getName(), codeSystemRF2Name, filenameEffectiveDate);
 		logger.info("Exporting file {}", componentFilePath);
+		logger.info("Export filter is " + (exportFilter==null?"null" : "present"));
 		try {
 			// Open zip entry
 			zipOutputStream.putNextEntry(new ZipEntry(componentFilePath));
@@ -359,7 +362,7 @@ public class ExportService {
 	}
 
 	private <T> int exportComponents(Class<T> componentClass, String entryDirectoryPrefix, String entryDirectory, String entryFilenamePrefix, String filenameEffectiveDate,
-			RF2Type exportType, ZipOutputStream zipOutputStream, List<T> components, String transientEffectiveTime, List<String> extraFieldNames, String codeSystemRF2Name,
+			RF2Type exportType, ZipOutputStream zipOutputStream, Set<T> components, String transientEffectiveTime, List<String> extraFieldNames, String codeSystemRF2Name,
 			ExportFilter<T> exportFilter) {
 
 		String componentFilePath = entryDirectoryPrefix + entryDirectory + entryFilenamePrefix + format("%s_%s_%s.txt", exportType.getName(), codeSystemRF2Name, filenameEffectiveDate);

@@ -3,6 +3,7 @@ package org.snomed.snowstorm.core.data.services;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.snomed.snowstorm.core.data.domain.*;
@@ -36,12 +37,12 @@ public class ModuleDependencyService extends ComponentService {
 	public static final int RECURSION_LIMIT = 100;
 	public static final String SOURCE_ET = "sourceEffectiveTime";
 	public static final String TARGET_ET = "targetEffectiveTime";
+	public static final PageRequest LARGE_PAGE = PageRequest.of(0,10000);
 	
 	public static final Set<String> CORE_MODULES = Set.of(Concepts.CORE_MODULE, Concepts.MODEL_MODULE);
-	public static final Set<String> SI_MODULES = Set.of(Concepts.CORE_MODULE, Concepts.MODEL_MODULE, Concepts.ICD10_MODULE);
 	
-	public static final PageRequest LARGE_PAGE = PageRequest.of(0,10000);
-
+	public Set<String> SI_MODULES = new HashSet<>(Set.of(Concepts.CORE_MODULE, Concepts.MODEL_MODULE, Concepts.ICD10_MODULE));
+	
 	@Autowired
 	private BranchService branchService;
 	
@@ -92,20 +93,27 @@ public class ModuleDependencyService extends ComponentService {
 			cacheValidAt = currentTime;
 			logger.info("MDR cache of International Modules refreshed for HEAD time: {}", currentTime);
 			
+			//During unit tests, or in non-standard installations we might not see the ICD-10 Module
+			if (!cachedInternationalModules.contains(Concepts.ICD10_MODULE)) {
+				SI_MODULES.remove(Concepts.ICD10_MODULE);
+			}
+			
 			derivativeModules = cachedInternationalModules.stream()
 					.filter(m -> !SI_MODULES.contains(m))
 					.collect(Collectors.toSet());
+			
+			logger.info("{} derivative modules set to be {} in MDRS export.", derivativeModules.size(), (excludeDerivativeModules?"excluded":"included"));
 		}
 	}
 	
 	/**
 	 * @param branchPath
 	 * @param effectiveDate
-	 * @param moduleFilter
+	 * @param modulesIncluded
 	 * @param commit optionally passed to persist generated members
 	 * @return
 	 */
-	public List<ReferenceSetMember> generateModuleDependencies(String branchPath, String effectiveDate, Set<String> moduleFilter, Commit commit) {
+	public Set<ReferenceSetMember> generateModuleDependencies(String branchPath, String effectiveDate, Set<String> modulesIncluded, Commit commit) {
 		StopWatch sw = new StopWatch("MDRGeneration");
 		sw.start();
 		refreshCache();
@@ -123,7 +131,7 @@ public class ModuleDependencyService extends ComponentService {
 		
 		//Do I have a dependency release?  If so, what's its effective time?
 		boolean isEdition = true;
-		boolean isInternational = false;
+		boolean isInternational = true;
 		Integer dependencyET = null;
 		if (cs == null) {
 			logger.warn("No CodeSystem associated with branch {} assuming International CodeSystem", branchPath);
@@ -133,7 +141,8 @@ public class ModuleDependencyService extends ComponentService {
 		
 		if (dependencyET == null) {
 			dependencyET = Integer.parseInt(effectiveDate);
-			isInternational = true;
+		} else {
+			isInternational = false;
 		}
 		
 		if (branch.getMetadata() != null && branch.getMetadata().getString(BranchMetadataKeys.DEPENDENCY_PACKAGE) != null ) {
@@ -142,24 +151,34 @@ public class ModuleDependencyService extends ComponentService {
 		
 		//What modules are actually present in the content?
 		Map<String,Map<String,Long>> moduleCountMap = statsService.getComponentCountsPerModule(branchPath);
-		Set<String> modulesRequired;
-		if (moduleFilter != null && !moduleFilter.isEmpty()) {
-			modulesRequired = new HashSet<>(moduleFilter);
-		} else {
-			modulesRequired = moduleCountMap.values().stream()
+		Set<String> modulesWithContent = moduleCountMap.values().stream()
 				.map(Map::keySet)
 				.flatMap(Set::stream)
 				.collect(Collectors.toSet());
-			
-			//If we're not an Edition, remove all international modules
-			if (!isEdition) {
-				modulesRequired.removeAll(cachedInternationalModules);
-			}
+		
+		Set<String> modulesRequired = new HashSet<>();
+		//US Edition (for example) will include the ICD-10 Module
+		if (isEdition) {
+			modulesRequired.addAll(SI_MODULES);
+		}
+		
+		if (modulesIncluded != null && !modulesIncluded.isEmpty()) {
+			modulesRequired.addAll(modulesIncluded);
+			//But we only want to retain those modules that actually have content
+			//Especially because the SRS requests all known modules regardless
+			modulesRequired.retainAll(modulesWithContent);
+		} else {
+			modulesRequired = modulesWithContent;
+		}
+		
+		//If we're not an Edition, remove all international modules
+		if (!isEdition) {
+			modulesRequired.removeAll(cachedInternationalModules);
 		}
 		
 		//Recover all these module concepts to find out what module they themselves were defined in.
 		//Generally, refset type modules are defined in the main extension module
-		Map<String, String> moduleParentMap = getModuleParents(branchPath, new HashSet<>(modulesRequired));
+		Map<String, String> moduleHierarchyMap = getModuleOfModule(branchPath, new HashSet<>(modulesRequired));
 		
 		//For extensions, the module with the concepts in it is assumed to be the parent, UNLESS
 		//a module concept is defined in another module, in which case the owning module is the parent. 
@@ -174,19 +193,12 @@ public class ModuleDependencyService extends ComponentService {
 					greatestCount = moduleCount.getValue();
 				}
 			}
-			if (moduleParentMap.get(topLevelExtensionModule) == null || 
-					moduleParentMap.get(topLevelExtensionModule).contentEquals(topLevelExtensionModule)) {
-				moduleParentMap.put(topLevelExtensionModule, Concepts.CORE_MODULE);
+			if (moduleHierarchyMap.get(topLevelExtensionModule) == null || 
+					moduleHierarchyMap.get(topLevelExtensionModule).contentEquals(topLevelExtensionModule)) {
+				moduleHierarchyMap.put(topLevelExtensionModule, Concepts.CORE_MODULE);
 			}
 		}
-		
-		//US Editition will include the ICD-10 Module
-		if (isEdition) {
-			modulesRequired.addAll(SI_MODULES);
-		} else {
-			modulesRequired.addAll(CORE_MODULES);
-		}
-		
+
 		//Remove any map entries that we don't need
 		moduleMap.keySet().retainAll(modulesRequired);
 		
@@ -207,11 +219,12 @@ public class ModuleDependencyService extends ComponentService {
 			while (!thisLevel.equals(Concepts.MODEL_MODULE)){
 				thisLevel = updateOrCreateModuleDependency(moduleId, 
 						thisLevel, 
-						moduleParentMap, 
+						moduleHierarchyMap, 
 						moduleDependencies,
 						effectiveDate,
 						dependencyET,
-						branchPath);
+						branchPath,
+						isInternational);
 				if (++recursionLimit > RECURSION_LIMIT) {
 					throw new IllegalStateException ("Recursion limit reached calculating MDR in " + branchPath + " for module " + thisLevel);
 				}
@@ -220,19 +233,21 @@ public class ModuleDependencyService extends ComponentService {
 
 		sw.stop();
 		logger.info("MDR generation for {}, modules [{}] took {}s", branchPath, String.join(", ", modulesRequired), sw.getTotalTimeSeconds());
-		List<ReferenceSetMember> updatedMDRmembers = moduleMap.values().stream()
+		Set<ReferenceSetMember> mdrMembers = moduleMap.values().stream()
 				.flatMap(Set::stream)
-				.filter(rm -> rm.getEffectiveTime().equals(effectiveDate))
-				.collect(Collectors.toList());
+				.collect(Collectors.toSet());
 		
 		if (commit != null) {
+			List<ReferenceSetMember> updatedMDRmembers = mdrMembers.stream()
+					.filter(rm -> rm.getEffectiveTime().equals(effectiveDate))
+					.collect(Collectors.toList());
 			doSaveBatchComponents(updatedMDRmembers, commit, ReferenceSetMember.Fields.MEMBER_ID, memberRepository);
 		}
-		return updatedMDRmembers;
+		return mdrMembers;
 	}
 
 	private String updateOrCreateModuleDependency(String moduleId, String thisLevel, Map<String, String> moduleParents,
-			Set<ReferenceSetMember> moduleDependencies, String effectiveDate, Integer dependencyET, String branchPath) {
+			Set<ReferenceSetMember> moduleDependencies, String effectiveDate, Integer dependencyET, String branchPath, boolean isInternational) {
 		//Take us up a level
 		String nextLevel = moduleParents.get(thisLevel);
 		if (nextLevel == null) {
@@ -241,9 +256,18 @@ public class ModuleDependencyService extends ComponentService {
 		ReferenceSetMember rm = findOrCreateModuleDependency(moduleId, moduleDependencies, nextLevel);
 		moduleDependencies.add(rm);
 		rm.setRefsetId(Concepts.REFSET_MODULE_DEPENDENCY);
-		rm.setEffectiveTimeI(Integer.parseInt(effectiveDate));
-		rm.setAdditionalField(SOURCE_ET, effectiveDate);
-		rm.markChanged();
+		if (!isInternational && cachedInternationalModules.contains(moduleId)) {
+			rm.setAdditionalField(SOURCE_ET, dependencyET.toString());
+		} else {
+			rm.setEffectiveTimeI(Integer.parseInt(effectiveDate));
+			rm.setAdditionalField(SOURCE_ET, effectiveDate);
+			rm.markChanged();
+		}
+		
+		if (rm.getEffectiveTime() == null) {
+			rm.setEffectiveTimeI(Integer.parseInt(effectiveDate));
+		}
+		
 		//Now is this module part of our dependency, or is it unique part of this CodeSystem?
 		//For now, we'll assume the International Edition is the dependency
 		if (cachedInternationalModules.contains(nextLevel)) {
@@ -269,10 +293,11 @@ public class ModuleDependencyService extends ComponentService {
 		rm.setModuleId(moduleId);
 		rm.setReferencedComponentId(targetModuleId);
 		rm.setActive(true);
+		rm.setCreating(true);
 		return rm;
 	}
 
-	private Map<String, String> getModuleParents(String branchPath, Set<String> moduleIds) {
+	private Map<String, String> getModuleOfModule(String branchPath, Set<String> moduleIds) {
 		//Looking up the modules that concepts are declared in doesn't give guaranteed right answer
 		//eg INT derivative packages are declared in model module but obviously reference core concepts
 		//Hard code international modules other than model to core
@@ -285,26 +310,34 @@ public class ModuleDependencyService extends ComponentService {
 		moduleParentMap.remove(Concepts.MODEL_MODULE);
 		
 		//So we don't need to look these up
-		List<Long> conceptIds = moduleIds.stream()
+		Set<Long> conceptIds = moduleIds.stream()
 				.filter(m -> !cachedInternationalModules.contains(m))
 				.map(Long::parseLong)
-				.collect(Collectors.toList());
+				.collect(Collectors.toSet());
+		
 		
 		int recursionDepth = 0;
 		//Repeat lookup of parents until all modules encountered are populated in the map
 		while (!conceptIds.isEmpty()) {
-			Page<Concept> modulePage = conceptService.find(conceptIds, null, branchPath, LARGE_PAGE);
+			Page<Concept> modulePage = conceptService.find(new ArrayList<>(conceptIds), null, branchPath, LARGE_PAGE);
 			Map<String, String> partialParentMap = modulePage.getContent().stream()
 					.collect(Collectors.toMap(Concept::getId, SnomedComponent::getModuleId));
 				moduleParentMap.putAll(partialParentMap);
-				
-			if (modulePage.getContent().size() != conceptIds.size()) {
-				String msg = "Failed to find expected " + moduleIds.size() + " module concepts in " + branchPath;
+			int foundCount = modulePage.getContent().size();
+			if (foundCount != conceptIds.size()) {
+				String msg = "Found " + foundCount + " but expected " + conceptIds.size() + " module concepts in " + branchPath;
 				logger.error(msg);
 				
 				//What are we missing?
 				Set<String> allMissing = new HashSet<>(moduleIds);
 				allMissing.removeAll(moduleParentMap.keySet());
+				
+				//Debug. If we end up with nothing missing here, then what did we have already that we didn't recover?
+				if (allMissing.isEmpty()) {
+					Set<String> found = modulePage.getContent().stream().map(c -> c.getId()).collect(Collectors.toSet());
+					logger.warn("Requested: " + StringUtils.join(conceptIds, ','));
+					logger.warn("Received: " + StringUtils.join(found, ','));
+				}
 				//Did we find even 1 module concept?
 				String bestFind = moduleParentMap.keySet().iterator().hasNext()?moduleParentMap.keySet().iterator().next():null;
 				if (bestFind == null) {
@@ -319,20 +352,34 @@ public class ModuleDependencyService extends ComponentService {
 				return moduleParentMap;
 			}
 			//Now look up all these new parents as well, unless we've already got them in our map
+			//And if the module was defined in the model module, then there's no need to look that up
 			conceptIds = partialParentMap.values().stream()
 					.filter(m -> !moduleParentMap.containsKey(m))
+					.filter(m -> !m.equals(Concepts.MODEL_MODULE))
 					.map(Long::parseLong)
-					.collect(Collectors.toList());
+					.collect(Collectors.toSet());
 			
 			if (++recursionDepth > RECURSION_LIMIT) {
 				throw new IllegalStateException("Recursion depth reached looking for module parents in " + branchPath + " with " + String.join(",", moduleIds));
 			}
 		}
-		
 		return moduleParentMap;
 	}
+	
+	public void resetCounter() {
+		firstFew = 0;
+	}
 
+	int firstFew = 0;
 	public boolean isExportable(ReferenceSetMember rm, boolean isExtension) {
+		//TODO Take this out once we work out why BE is not being filtered.
+		if (firstFew < 3) {
+			logger.info("Exporting with derivatives " + (excludeDerivativeModules? "excluded.":"included."));
+			logger.info("Derivatives are: " + StringUtils.join(derivativeModules, ", "));
+			logger.info("Examining : " + rm);
+			firstFew++;
+		}
+		
 		//Extensions don't list dependencies of core modules
 		if (isExtension && SI_MODULES.contains(rm.getModuleId())) {
 			return false;
