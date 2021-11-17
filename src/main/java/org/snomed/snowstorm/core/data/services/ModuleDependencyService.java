@@ -9,6 +9,7 @@ import org.snomed.snowstorm.core.data.domain.*;
 import org.snomed.snowstorm.core.data.repositories.ReferenceSetMemberRepository;
 import org.snomed.snowstorm.core.data.services.pojo.MemberSearchRequest;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -21,7 +22,6 @@ import io.kaicode.elasticvc.api.ComponentService;
 import io.kaicode.elasticvc.domain.Branch;
 import io.kaicode.elasticvc.domain.Commit;
 
-@Service
 /*
  * Service to create module dependency refset members as required, either temporarily
  * for export, or persisted eg during versioning.
@@ -30,12 +30,15 @@ import io.kaicode.elasticvc.domain.Commit;
  * code system, so for extensions on extensions, we'll need to find the parent branch and then
  * get THAT dependency date.
  */
+@Service
 public class ModuleDependencyService extends ComponentService {
 	
 	public static final int RECURSION_LIMIT = 100;
 	public static final String SOURCE_ET = "sourceEffectiveTime";
 	public static final String TARGET_ET = "targetEffectiveTime";
-	public static final Set<String> SI_MODULES = Set.of(Concepts.CORE_MODULE, Concepts.MODEL_MODULE);
+	
+	public static final Set<String> CORE_MODULES = Set.of(Concepts.CORE_MODULE, Concepts.MODEL_MODULE);
+	public static final Set<String> SI_MODULES = Set.of(Concepts.CORE_MODULE, Concepts.MODEL_MODULE, Concepts.ICD10_MODULE);
 	
 	public static final PageRequest LARGE_PAGE = PageRequest.of(0,10000);
 
@@ -57,11 +60,21 @@ public class ModuleDependencyService extends ComponentService {
 	@Autowired
 	@Lazy
 	private ReferenceSetMemberService refsetService;
+	
+	@Value("${mdrs.exclude.derivative-modules}")
+	private boolean excludeDerivativeModules;
+	
+	@Value("#{'${mdrs.blocklist}'.split('\\s*,\\s*')}")  //Split and trim spaces
+	private List<String> blockListedModules;
 
 	private final Logger logger = LoggerFactory.getLogger(getClass());
 	
 	private long cacheValidAt = 0L;
 	private Set<String> cachedInternationalModules;
+	
+	//Derivative modules are those belonging with the International Edition (like the GPS)
+	//but not packaged with it, so not included eg in the US Edition
+	private Set<String> derivativeModules;
 	
 	//Refresh when the HEAD time is greater than the HEAD time on MAIN
 	//Check every 30 mins to save time when export operation actually called
@@ -78,6 +91,10 @@ public class ModuleDependencyService extends ComponentService {
 				.collect(Collectors.toSet());
 			cacheValidAt = currentTime;
 			logger.info("MDR cache of International Modules refreshed for HEAD time: {}", currentTime);
+			
+			derivativeModules = cachedInternationalModules.stream()
+					.filter(m -> !SI_MODULES.contains(m))
+					.collect(Collectors.toSet());
 		}
 	}
 	
@@ -102,9 +119,11 @@ public class ModuleDependencyService extends ComponentService {
 		
 		//What modules are known to this code system?
 		CodeSystem cs = codeSystemService.findClosestCodeSystemUsingAnyBranch(branchPath, true);
+		Branch branch = branchService.findBranchOrThrow(branchPath);
 		
 		//Do I have a dependency release?  If so, what's its effective time?
-		boolean isInternational = true;
+		boolean isEdition = true;
+		boolean isInternational = false;
 		Integer dependencyET = null;
 		if (cs == null) {
 			logger.warn("No CodeSystem associated with branch {} assuming International CodeSystem", branchPath);
@@ -114,8 +133,11 @@ public class ModuleDependencyService extends ComponentService {
 		
 		if (dependencyET == null) {
 			dependencyET = Integer.parseInt(effectiveDate);
-		} else {
-			isInternational = false;
+			isInternational = true;
+		}
+		
+		if (branch.getMetadata() != null && branch.getMetadata().getString(BranchMetadataKeys.DEPENDENCY_PACKAGE) != null ) {
+			isEdition = false;
 		}
 		
 		//What modules are actually present in the content?
@@ -129,8 +151,8 @@ public class ModuleDependencyService extends ComponentService {
 				.flatMap(Set::stream)
 				.collect(Collectors.toSet());
 			
-			//If we're not international, remove all international modules
-			if (!isInternational) {
+			//If we're not an Edition, remove all international modules
+			if (!isEdition) {
 				modulesRequired.removeAll(cachedInternationalModules);
 			}
 		}
@@ -141,6 +163,7 @@ public class ModuleDependencyService extends ComponentService {
 		
 		//For extensions, the module with the concepts in it is assumed to be the parent, UNLESS
 		//a module concept is defined in another module, in which case the owning module is the parent. 
+		//Calculate the top level for any given extension, so we know when to stop!
 		String topLevelExtensionModule = null;
 		if (!isInternational) {
 			Long greatestCount = 0L;
@@ -155,6 +178,13 @@ public class ModuleDependencyService extends ComponentService {
 					moduleParentMap.get(topLevelExtensionModule).contentEquals(topLevelExtensionModule)) {
 				moduleParentMap.put(topLevelExtensionModule, Concepts.CORE_MODULE);
 			}
+		}
+		
+		//US Editition will include the ICD-10 Module
+		if (isEdition) {
+			modulesRequired.addAll(SI_MODULES);
+		} else {
+			modulesRequired.addAll(CORE_MODULES);
 		}
 		
 		//Remove any map entries that we don't need
@@ -187,8 +217,7 @@ public class ModuleDependencyService extends ComponentService {
 				}
 			}
 		}
-		
-		modulesRequired.addAll(SI_MODULES);
+
 		sw.stop();
 		logger.info("MDR generation for {}, modules [{}] took {}s", branchPath, String.join(", ", modulesRequired), sw.getTotalTimeSeconds());
 		List<ReferenceSetMember> updatedMDRmembers = moduleMap.values().stream()
@@ -272,7 +301,6 @@ public class ModuleDependencyService extends ComponentService {
 			if (modulePage.getContent().size() != conceptIds.size()) {
 				String msg = "Failed to find expected " + moduleIds.size() + " module concepts in " + branchPath;
 				logger.error(msg);
-				// new IllegalStateException (msg);  //Caused a TON of Unit Tests to fail because they don't declare module concepts
 				
 				//What are we missing?
 				Set<String> allMissing = new HashSet<>(moduleIds);
@@ -303,4 +331,21 @@ public class ModuleDependencyService extends ComponentService {
 		
 		return moduleParentMap;
 	}
+
+	public boolean isExportable(ReferenceSetMember rm, boolean isExtension) {
+		//Extensions don't list dependencies of core modules
+		if (isExtension && SI_MODULES.contains(rm.getModuleId())) {
+			return false;
+		}
+		if (excludeDerivativeModules && derivativeModules.contains(rm.getModuleId())) {
+			return false;
+		}
+		
+		if (blockListedModules != null && blockListedModules.contains(rm.getModuleId())) {
+			return false;
+		}
+		
+		return true;
+	}
+
 }
